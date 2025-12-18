@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>JARVIS HUD - Face, Hand & Voice</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;900&display=swap" rel="stylesheet">
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Orbitron', sans-serif; }
+        #webcam { position: absolute; width: 100vw; height: 100vh; object-fit: cover; transform: scaleX(-1); filter: brightness(0.3) contrast(1.2) saturate(0.5); }
+        canvas { position: absolute; top: 0; left: 0; z-index: 10; pointer-events: none; }
+        #overlay { position: absolute; top: 20px; left: 20px; color: #00ffff; z-index: 20; font-size: 12px; text-shadow: 0 0 10px #00ffff; line-height: 1.5; }
+        .highlight { color: #fff; text-shadow: 0 0 15px #00ffff; }
+    </style>
+</head>
+<body>
+    <video id="webcam" autoplay playsinline></video>
+    <div id="overlay">
+        <div class="highlight">SYSTEM: ONLINE</div>
+        <div id="gesture-status">GESTURE: IDLE</div>
+        <div id="speech-status">VOICE: LISTENING...</div>
+        <div style="font-size: 9px; margin-top: 10px; opacity: 0.7;">COMMANDS: "RED ALERT", "GO BLUE"</div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FaceLandmarker, HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+        let faceLandmarker, handLandmarker;
+        let video = document.getElementById("webcam");
+        const gestureStatus = document.getElementById("gesture-status");
+        const speechStatus = document.getElementById("speech-status");
+
+        let systemColor = 0x00ffff;
+        let isOverride = false;
+
+        // --- THREE.JS SCENE ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const hudGroup = new THREE.Group();
+        scene.add(hudGroup);
+
+        const ringMat = new THREE.MeshBasicMaterial({ color: systemColor, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+        const mainRing = new THREE.Mesh(new THREE.TorusGeometry(2, 0.02, 16, 100), ringMat);
+        hudGroup.add(mainRing);
+
+        const pCount = 500;
+        const coords = new Float32Array(pCount * 3);
+        for(let i=0; i<pCount*3; i++) coords[i] = (Math.random() - 0.5) * 20;
+        const particles = new THREE.BufferGeometry();
+        particles.setAttribute('position', new THREE.BufferAttribute(coords, 3));
+        const pMesh = new THREE.Points(particles, new THREE.PointsMaterial({ color: 0x00ffff, size: 0.05 }));
+        scene.add(pMesh);
+
+        camera.position.z = 5;
+
+        // --- VOICE RECOGNITION ---
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+            const recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.lang = 'en-US';
+
+            recognition.onresult = (event) => {
+                const transcript = event.results[event.results.length - 1][0].transcript.toLowerCase();
+                if (transcript.includes("red alert")) {
+                    systemColor = 0xff0000;
+                    isOverride = true;
+                    speechStatus.innerText = "VOICE: RED ALERT ACTIVATED";
+                } else if (transcript.includes("go blue")) {
+                    systemColor = 0x00ffff;
+                    isOverride = false;
+                    speechStatus.innerText = "VOICE: SYSTEMS NORMAL";
+                }
+            };
+            
+            // Start listening on first click (browser policy)
+            window.addEventListener('click', () => recognition.start(), { once: true });
+        }
+
+        // --- MEDIAPIPE CORE ---
+        async function initAI() {
+            const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+            faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+                baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task` },
+                runningMode: "VIDEO"
+            });
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: { modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task` },
+                runningMode: "VIDEO"
+            });
+            startCamera();
+        }
+
+        async function startCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+            video.srcObject = stream;
+            video.addEventListener("loadeddata", renderLoop);
+        }
+
+        function renderLoop() {
+            const now = performance.now();
+            const faceResults = faceLandmarker.detectForVideo(video, now);
+            const handResults = handLandmarker.detectForVideo(video, now);
+
+            if (faceResults.faceLandmarks?.[0]) {
+                const nose = faceResults.faceLandmarks[0][1];
+                hudGroup.position.x += ((nose.x - 0.5) * -8 - hudGroup.position.x) * 0.1;
+                hudGroup.position.y += ((nose.y - 0.5) * -8 - hudGroup.position.y) * 0.1;
+                pMesh.position.x = hudGroup.position.x * 0.2;
+                pMesh.position.y = hudGroup.position.y * 0.2;
+            }
+
+            if (handResults.landmarks?.[0]) {
+                const distance = Math.hypot(handResults.landmarks[0][4].x - handResults.landmarks[0][8].x, handResults.landmarks[0][4].y - handResults.landmarks[0][8].y);
+                if (distance < 0.04) {
+                    gestureStatus.innerText = "GESTURE: PINCHED";
+                    if(!isOverride) ringMat.color.setHex(0xff3300);
+                    hudGroup.scale.lerp(new THREE.Vector3(0.7, 0.7, 0.7), 0.2);
+                } else {
+                    gestureStatus.innerText = "GESTURE: IDLE";
+                    ringMat.color.setHex(systemColor);
+                    hudGroup.scale.lerp(new THREE.Vector3(1, 1, 1), 0.1);
+                }
+            }
+
+            mainRing.rotation.z += 0.01;
+            renderer.render(scene, camera);
+            requestAnimationFrame(renderLoop);
+        }
+
+        initAI();
+    </script>
+</body>
+</html>
